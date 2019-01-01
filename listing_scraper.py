@@ -75,10 +75,33 @@ def get_printable_reports_url(driver):
     Parameters
     ----------
     driver : Selenium webdriver object. Must execute driver.get(url) prior to
-             calling this get_soup() function
+             calling this function
     """
     return driver.find_element_by_link_text('Printable Reports').get_property('href')
-
+                    
+def open_printable_reports_page(driver):
+    """
+    Loads the printable reports page in a new tab. Webdriver switches window
+    to newly opened tab. Either text link at the top 1/4 of page says "Printable Reports"
+    or a small printer icon that re-directs the url with some js code is used to
+    open the new tab
+    
+    Parameters
+    ----------
+    
+    driver : Selenium webdriver object. Must execute driver.get(url) prior to
+             calling this function
+    """
+    try:
+        driver.find_element_by_link_text('Printable Reports').click()
+    except:
+        driver.find_elements_by_class_name("icon-print-report")[0].click()
+        
+    sleep(5)
+    driver.switch_to.window(driver.window_handles[1]) #Points selenium driver to the new tab
+    assert driver.title == "Customer Report"
+    print("")
+                    
 def get_listing_entry(num,soup):
     """
     Finds the HTML location for each housing listing available.
@@ -140,7 +163,7 @@ def get_listing_total(soup):
             listing_count += 1
     return listing_count
 
-def get_results(listing):
+def get_results(listing,driver):
     """
     Single function that acquires all data corresiponding to an individual
     mls listing. Results are returned as a dictionary object
@@ -161,10 +184,13 @@ def get_results(listing):
         listing : beautifulsoup object that is returned after
                   running the get_listing_entry() function
         """
-        id_ = get_listing_id(listing)
-        photo_count = get_listing_photo_count(listing)
-        return [f'http://pxlimages.xmlsweb.com/NJMLS/M/Images/{id_}.{cnt}.JPG?v=1' for cnt in range(1, photo_count + 1)]
-
+        try:
+            id_ = get_listing_id(listing)
+            photo_count = get_listing_photo_count(listing)
+            return [f'http://pxlimages.xmlsweb.com/NJMLS/M/Images/{id_}.{cnt}.JPG?v=1' for cnt in range(1, photo_count + 1)]
+        except:
+            return [listing.find('img')['src']]
+                    
     def get_box_vals(listing):
         """
         Finds basic information about a given housing listing on mls. This is the block of
@@ -206,15 +232,25 @@ def get_results(listing):
      To the listings that do not contain the 'Virtual Tour' link. The VT variable is boolean and coerced into an integer
      That way, adding VT to the row index accounts for row offset."""
     VT = True if 'Virtual'.lower() in listing.text.lower() and 'Tour'.lower() in listing.text.lower() else False
-    
+    if driver.current_url == "http://www.priv.njmlsnew.xmlsweb.com/reportsPDF.asp":
+        VT = 0
+                    
     results1 = dict(zip([x for x in listing.findAll('table')[15 + VT].text.replace('#\n\n','#').split('\n\t') if x != '\n'],
                         [x for x in listing.findAll('table')[16 + VT].text.replace('#\n\n','#').replace("\xa0",'empty').split('\n\t') if x != '\n']))
-    results1['Tax Condo #'] = results1['Tax Condo #'].replace('\n\n','')
-    
+    try:
+        results1['Tax Condo #'] = results1.get('Tax Condo #').replace('\n\n','')
+    except:
+        results1['Tax Condo #'] = 'empty'
     results2 = dict(zip([x for x in listing.findAll('table')[17 + VT].text.replace('Sub-Style\n\n','Sub-Style').split('\n\t') if x != '\n'],
                         [x for x in listing.findAll('table')[18 + VT].text.replace('#\n\n','#').replace("\xa0","empty").split('\n\t') if x != '\n']))
-    results2['Sub-Style'] = results2['Sub-Style'].replace('\n\n','')
-    results2['Taxes'] = results2['Taxes'].replace("$","").replace(",","")
+    try:
+        results2['Sub-Style'] = results2.get('Sub-Style').replace('\n\n','')
+    except:
+        results2['Sub-Style'] = 'empty'
+    try:
+        results2['Taxes'] = results2.get('Taxes').replace("$","").replace(",","")
+    except:
+        results2['Taxes'] = 'empty'
     
     monthly_maintenance = listing.findAll('table')[19 + VT].findAll('td')[1].contents[0].replace("$","").replace(",","")
     maintenance_includes = listing.findAll('table')[19 + VT].findAll('td')[3].contents[0].replace("$","").replace(",","").replace('\xa0','empty')
@@ -323,7 +359,14 @@ def get_results(listing):
         "laundry":laundry,
         "possession":possession
     }
-    return dict(**results1,**results2,**results3,**results4,**results5,**get_box_vals(listing),image_urls="||".join(get_thumbnail_urls(listing)))
+    return dict(**results1,
+                **results2,
+                **results3,
+                **results4,
+                **results5,
+                **get_box_vals(listing),
+                image_urls="||".join(get_thumbnail_urls(listing))
+               )
 
 def main():
     url = parser.parse_args().url
@@ -341,11 +384,12 @@ def main():
     bprint("Initial MLS page loaded.")
     
     # get link and load printable reports page
-    printable_reports_url = get_printable_reports_url(driver)
-    driver.get(printable_reports_url)
-    gprint("10 Second sleep while page loads...\n")    
-    sleep(10)
     
+    #printable_reports_url = get_printable_reports_url(driver)
+    #driver.get(printable_reports_url)
+    open_printable_reports_page(driver)
+    gprint("10 Second sleep while page loads...\n")    
+    #sleep(10)
     assert driver.title == 'Customer Report'
     
     bprint("Successfully loaded Printable Reports page:\n{}".format(driver.current_url))
@@ -359,22 +403,24 @@ def main():
     
     for i in range(get_listing_total(soup)):
         print (f"Acquiring Data for Listing {i}...")
-        housing_df = housing_df.append(pd.DataFrame(get_results(get_listing_entry(i,soup)),index=[i]))
+        listing_temp = get_listing_entry(i,soup)
+        temp_df = pd.DataFrame(get_results(listing_temp,driver),index=[i])
+        housing_df = housing_df.append(temp_df)
     
     gprint("Data Acquisition Complete")
     
-    print ("Deleting prior records from temp table...")
-    query = """
-        #standardSQL
-        DELETE housing.mls_tmp
-        WHERE TRUE;"""
-    client.query(query)
+    #print ("Deleting prior records from temp table...")
+    #query = """
+    #    #standardSQL
+    #    DELETE housing.mls_tmp
+    #    WHERE TRUE;"""
+    #client.query(query)
     
     print ("Preping data for BigQuery...")
-    dataset_id = 'housing'
-    table_id = 'mls_tmp'
-    table_ref = client.dataset(dataset_id).table(table_id)
-    table = client.get_table(table_ref)
+    #dataset_id = 'housing'
+    #table_id = 'mls_tmp'
+    #table_ref = client.dataset(dataset_id).table(table_id)
+    #table = client.get_table(table_ref)
     
     insert_rows = []
     for _, \
